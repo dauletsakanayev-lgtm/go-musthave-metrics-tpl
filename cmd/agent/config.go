@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"time"
 )
 
+// agentConfig — итоговая конфигурация агента.
 type agentConfig struct {
 	Addr           string
 	PollInterval   time.Duration
@@ -17,6 +19,31 @@ type agentConfig struct {
 	CryptoKey      string
 }
 
+// agentJSONConfig — представление конфигурации из JSON-файла.
+// Интервалы задаются строкой в формате time.Duration ("1s", "500ms").
+type agentJSONConfig struct {
+	Address        string `json:"address"`
+	ReportInterval string `json:"report_interval"`
+	PollInterval   string `json:"poll_interval"`
+	CryptoKey      string `json:"crypto_key"`
+}
+
+// loadAgentJSON читает и парсит JSON-файл конфигурации агента.
+func loadAgentJSON(path string) (*agentJSONConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("чтение config-файла: %w", err)
+	}
+	var cfg agentJSONConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("разбор config-файла: %w", err)
+	}
+	return &cfg, nil
+}
+
+// parseConfig собирает конфигурацию агента с учётом приоритетов:
+// env > флаг > значение из JSON-файла > дефолт. Файл конфигурации
+// указывается через -c/-config или переменную окружения CONFIG.
 func parseConfig() (agentConfig, error) {
 	addr := flag.String("a", "localhost:8080", "адрес сервера (host:port)")
 	pollInterval := flag.Int("p", 2, "интервал сбора метрик (сек)")
@@ -24,13 +51,58 @@ func parseConfig() (agentConfig, error) {
 	hashKey := flag.String("k", "", "ключ для подписи SHA256")
 	rateLimit := flag.Int("l", 1, "количество одновременных запросов")
 	cryptoKey := flag.String("crypto-key", "", "путь до файла с публичным RSA-ключом (пусто — шифрование отключено)")
+	configPath := flag.String("c", "", "путь до JSON-файла конфигурации")
+	configPathLong := flag.String("config", "", "путь до JSON-файла конфигурации (алиас -c)")
 
 	flag.Parse()
 
+	// Определяем какие флаги были указаны явно — только их значения
+	// имеют приоритет над JSON-файлом.
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// Путь до JSON-файла: -c или -config; env CONFIG перекрывает флаг.
+	cfgPath := *configPath
+	if cfgPath == "" {
+		cfgPath = *configPathLong
+	}
+	if v, ok := os.LookupEnv("CONFIG"); ok {
+		cfgPath = v
+	}
+
+	// JSON-файл имеет самый низкий приоритет: заполняет только те поля,
+	// которые не заданы флагом и не заданы через env.
+	if cfgPath != "" {
+		jsonCfg, err := loadAgentJSON(cfgPath)
+		if err != nil {
+			return agentConfig{}, err
+		}
+		if !setFlags["a"] && jsonCfg.Address != "" {
+			*addr = jsonCfg.Address
+		}
+		if !setFlags["p"] && jsonCfg.PollInterval != "" {
+			d, err := time.ParseDuration(jsonCfg.PollInterval)
+			if err != nil {
+				return agentConfig{}, fmt.Errorf("config poll_interval: %w", err)
+			}
+			*pollInterval = int(d / time.Second)
+		}
+		if !setFlags["r"] && jsonCfg.ReportInterval != "" {
+			d, err := time.ParseDuration(jsonCfg.ReportInterval)
+			if err != nil {
+				return agentConfig{}, fmt.Errorf("config report_interval: %w", err)
+			}
+			*reportInterval = int(d / time.Second)
+		}
+		if !setFlags["crypto-key"] && jsonCfg.CryptoKey != "" {
+			*cryptoKey = jsonCfg.CryptoKey
+		}
+	}
+
+	// Env-переменные имеют самый высокий приоритет.
 	if v, ok := os.LookupEnv("ADDRESS"); ok {
 		*addr = v
 	}
-
 	if v, ok := os.LookupEnv("REPORT_INTERVAL"); ok {
 		sec, err := strconv.Atoi(v)
 		if err != nil {
@@ -38,7 +110,6 @@ func parseConfig() (agentConfig, error) {
 		}
 		*reportInterval = sec
 	}
-
 	if v, ok := os.LookupEnv("POLL_INTERVAL"); ok {
 		sec, err := strconv.Atoi(v)
 		if err != nil {
@@ -46,7 +117,6 @@ func parseConfig() (agentConfig, error) {
 		}
 		*pollInterval = sec
 	}
-
 	if v, ok := os.LookupEnv("RATE_LIMIT"); ok {
 		rl, err := strconv.Atoi(v)
 		if err != nil {
@@ -54,11 +124,9 @@ func parseConfig() (agentConfig, error) {
 		}
 		*rateLimit = rl
 	}
-
 	if v, ok := os.LookupEnv("KEY"); ok {
 		*hashKey = v
 	}
-
 	if v, ok := os.LookupEnv("CRYPTO_KEY"); ok {
 		*cryptoKey = v
 	}

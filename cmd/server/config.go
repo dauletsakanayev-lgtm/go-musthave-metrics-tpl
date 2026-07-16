@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
+// serverConfig — итоговая конфигурация сервера.
 type serverConfig struct {
 	Addr          string
 	LogLevel      string
@@ -21,6 +24,34 @@ type serverConfig struct {
 	CryptoKey     string
 }
 
+// serverJSONConfig — представление конфигурации сервера из JSON-файла.
+// Интервал store_interval задаётся строкой в формате time.Duration ("1s").
+// Restore — указатель, чтобы отличить "не задано в файле" от false.
+type serverJSONConfig struct {
+	Address       string `json:"address"`
+	Restore       *bool  `json:"restore"`
+	StoreInterval string `json:"store_interval"`
+	StoreFile     string `json:"store_file"`
+	DatabaseDSN   string `json:"database_dsn"`
+	CryptoKey     string `json:"crypto_key"`
+}
+
+// loadServerJSON читает и парсит JSON-файл конфигурации сервера.
+func loadServerJSON(path string) (*serverJSONConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("чтение config-файла: %w", err)
+	}
+	var cfg serverJSONConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("разбор config-файла: %w", err)
+	}
+	return &cfg, nil
+}
+
+// parseConfig собирает конфигурацию сервера с учётом приоритетов:
+// env > флаг > значение из JSON-файла > дефолт. Файл конфигурации
+// указывается через -c/-config или переменную окружения CONFIG.
 func parseConfig() (serverConfig, error) {
 	addr := flag.String("a", ":8080", "адрес сервера")
 	logLevel := flag.String("l", "info", "уровень логирования")
@@ -33,8 +64,55 @@ func parseConfig() (serverConfig, error) {
 	auditURL := flag.String("audit-url", "", "URL приёмника логов аудита (пусто — аудит по сети отключён)")
 	enablePprof := flag.Bool("pprof", false, "включить эндпоинты /debug/pprof (только для dev/staging)")
 	cryptoKey := flag.String("crypto-key", "", "путь до файла с приватным RSA-ключом (пусто — расшифровка отключена)")
+	configPath := flag.String("c", "", "путь до JSON-файла конфигурации")
+	configPathLong := flag.String("config", "", "путь до JSON-файла конфигурации (алиас -c)")
 	flag.Parse()
 
+	// Явно указанные флаги имеют приоритет над JSON-файлом.
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// Путь до JSON-файла: -c или -config; env CONFIG перекрывает флаг.
+	cfgPath := *configPath
+	if cfgPath == "" {
+		cfgPath = *configPathLong
+	}
+	if v, ok := os.LookupEnv("CONFIG"); ok {
+		cfgPath = v
+	}
+
+	// JSON-файл — самый низкий приоритет: заполняет только поля,
+	// не заданные ни флагом, ни (позже) env.
+	if cfgPath != "" {
+		jsonCfg, err := loadServerJSON(cfgPath)
+		if err != nil {
+			return serverConfig{}, err
+		}
+		if !setFlags["a"] && jsonCfg.Address != "" {
+			*addr = jsonCfg.Address
+		}
+		if !setFlags["r"] && jsonCfg.Restore != nil {
+			*restore = *jsonCfg.Restore
+		}
+		if !setFlags["i"] && jsonCfg.StoreInterval != "" {
+			d, err := time.ParseDuration(jsonCfg.StoreInterval)
+			if err != nil {
+				return serverConfig{}, fmt.Errorf("config store_interval: %w", err)
+			}
+			*storeInterval = int(d / time.Second)
+		}
+		if !setFlags["f"] && jsonCfg.StoreFile != "" {
+			*filePath = jsonCfg.StoreFile
+		}
+		if !setFlags["d"] && jsonCfg.DatabaseDSN != "" {
+			*databaseDSN = jsonCfg.DatabaseDSN
+		}
+		if !setFlags["crypto-key"] && jsonCfg.CryptoKey != "" {
+			*cryptoKey = jsonCfg.CryptoKey
+		}
+	}
+
+	// Env-переменные — самый высокий приоритет.
 	if v, ok := os.LookupEnv("ADDRESS"); ok {
 		*addr = v
 	}
