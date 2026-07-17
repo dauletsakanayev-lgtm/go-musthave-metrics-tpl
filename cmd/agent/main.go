@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/agent"
@@ -42,32 +46,86 @@ func main() {
 	sender := agent.NewSender(baseURL, cfg.HashKey, publicKey)
 	store := agent.NewMetricsStore()
 
+	// ctx отменяется при получении сигнала завершения (SIGINT/SIGTERM/SIGQUIT).
+	// Все дочерние горутины (сборщики, отправитель) слушают его и завершаются
+	// штатно, чтобы накопленные метрики не потерялись.
+	ctx, stop := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
+
+	// wg отслеживает все фоновые горутины отправки (worker pool),
+	// чтобы main дождался их завершения перед выходом.
+	var wg sync.WaitGroup
+
+	// Сборщик runtime-метрик.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		ticker := time.NewTicker(cfg.PollInterval)
-		for range ticker.C {
-			store.UpdateGauges(agent.CollectGauges())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				store.UpdateGauges(agent.CollectGauges())
+			}
 		}
 	}()
 
+	// Сборщик gopsutil-метрик.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		ticker := time.NewTicker(cfg.PollInterval)
-		for range ticker.C {
-			store.UpdatePSMetrics(agent.CollectPSUtilMetrics())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				store.UpdatePSMetrics(agent.CollectPSUtilMetrics())
+			}
 		}
 	}()
 
+	// Отправитель. Ограничение параллельных запросов через семафор,
+	// wg — чтобы дождаться завершения всех запущенных отправок.
 	sem := make(chan struct{}, cfg.RateLimit)
 	reportTicker := time.NewTicker(cfg.ReportInterval)
+	defer reportTicker.Stop()
 
-	for range reportTicker.C {
-		all, ps := store.GetAll()
-
+	sendBatch := func(metrics []agent.GaugeMetric, count int64) {
 		sem <- struct{}{}
-		go func(metrics []agent.GaugeMetric, count int64) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			defer func() { <-sem }()
 			if err := sender.SendBatch(metrics, count); err != nil {
 				log.Error().Err(err).Msg("отправка метрик")
 			}
-		}(all, ps)
+		}()
 	}
+
+reportLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			break reportLoop
+		case <-reportTicker.C:
+			all, ps := store.GetAll()
+			sendBatch(all, ps)
+		}
+	}
+
+	// Финальная отправка накопленных к моменту получения сигнала метрик.
+	log.Info().Msg("получен сигнал завершения, финальная отправка метрик")
+	all, ps := store.GetAll()
+	if len(all) > 0 {
+		sendBatch(all, ps)
+	}
+
+	// Ждём завершения всех сборщиков и отправителей.
+	wg.Wait()
+	log.Info().Msg("агент завершил работу корректно")
 }

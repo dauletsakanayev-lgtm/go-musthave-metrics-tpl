@@ -38,6 +38,9 @@ func main() {
 
 	var repo storage.Repository
 	var db *sql.DB
+	// memRepo сохраняется отдельно, чтобы можно было выполнить финальный
+	// сброс в файл после graceful shutdown HTTP-сервера.
+	var memRepo *storage.MemoryStorage
 
 	if cfg.DatabaseDSN != "" {
 		var err error
@@ -47,7 +50,7 @@ func main() {
 		}
 		repo = storage.NewPostgresStorege(db)
 	} else {
-		memRepo := storage.NewMemoryStorage()
+		memRepo = storage.NewMemoryStorage()
 
 		// загрузка метрик из файла при старте
 		if cfg.Restore && cfg.FilePath != "" {
@@ -101,4 +104,19 @@ func main() {
 		log.Fatal().Err(err).Msg("ошибка запуска сервера")
 	}
 
+	// Graceful shutdown: срv.Run уже дождался завершения in-flight
+	// HTTP-запросов. Осталось сбросить накопленные метрики в файл
+	// (если хранилище in-memory и путь задан) и закрыть соединение с БД.
+	if memRepo != nil && cfg.FilePath != "" {
+		if err := storage.SaveToFile(memRepo, cfg.FilePath); err != nil {
+			log.Error().Err(err).Msg("финальное сохранение метрик в файл не удалось")
+		} else {
+			log.Info().Str("file", cfg.FilePath).Msg("финальное сохранение метрик выполнено")
+		}
+	}
+	if db != nil {
+		if err := db.Close(); err != nil {
+			log.Error().Err(err).Msg("ошибка закрытия соединения с БД")
+		}
+	}
 }
