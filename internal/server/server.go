@@ -93,6 +93,8 @@ func (s *Server) buildRouter() http.Handler {
 // сигнала прерывания (SIGINT/SIGTERM/SIGQUIT), после чего выполняет
 // graceful shutdown: даёт срок in-flight запросам завершиться, затем возвращает
 // управление, чтобы main мог сохранить состояние и закрыть внешние ресурсы.
+// Для отслеживания сигнала используется signal.NotifyContext — это
+// идиоматичнее ручного канала и не требует явного signal.Stop.
 func (s *Server) Run() error {
 	r := s.buildRouter()
 
@@ -110,14 +112,18 @@ func (s *Server) Run() error {
 	}()
 	log.Info().Str("addr", s.addr).Msg("сервер запущен")
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
-	sig := <-quit
-	log.Info().Str("signal", sig.String()).Msg("Выключене сервера ... ")
+	// Контекст отменяется при получении любого из сигналов; stop освобождает
+	// ресурсы пакета signal при выходе из функции.
+	ctx, stop := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	<-ctx.Done()
+	log.Info().Msg("Выключене сервера ... ")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal().Err(err).Msg("Сервер был отключен")
 	}
 	log.Info().Msg("Сервер завершил работу корректно")

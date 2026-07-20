@@ -13,7 +13,7 @@ import (
 type serverConfig struct {
 	Addr          string
 	LogLevel      string
-	StoreInterval int
+	StoreInterval time.Duration
 	FilePath      string
 	Restore       bool
 	DatabaseDSN   string
@@ -25,7 +25,7 @@ type serverConfig struct {
 }
 
 // serverJSONConfig — представление конфигурации сервера из JSON-файла.
-// Интервал store_interval задаётся строкой в формате time.Duration ("1s").
+// store_interval задаётся строкой в формате time.Duration ("1s", "500ms").
 // Restore — указатель, чтобы отличить "не задано в файле" от false.
 type serverJSONConfig struct {
 	Address       string `json:"address"`
@@ -52,10 +52,14 @@ func loadServerJSON(path string) (*serverJSONConfig, error) {
 // parseConfig собирает конфигурацию сервера с учётом приоритетов:
 // env > флаг > значение из JSON-файла > дефолт. Файл конфигурации
 // указывается через -c/-config или переменную окружения CONFIG.
+//
+// StoreInterval хранится как time.Duration; из JSON поддерживается полный
+// формат time.ParseDuration ("500ms", "1m30s"), из флагов и env — целые
+// секунды (обратная совместимость).
 func parseConfig() (serverConfig, error) {
 	addr := flag.String("a", ":8080", "адрес сервера")
 	logLevel := flag.String("l", "info", "уровень логирования")
-	storeInterval := flag.Int("i", 300, "интервал сохранения на диск")
+	storeInterval := flag.Int("i", 300, "интервал сохранения на диск (сек)")
 	filePath := flag.String("f", "metrics.json", "путь до файла")
 	restore := flag.Bool("r", true, "загружать при старте")
 	databaseDSN := flag.String("d", "", "строка подключения к PostgreSQL")
@@ -71,6 +75,11 @@ func parseConfig() (serverConfig, error) {
 	// Явно указанные флаги имеют приоритет над JSON-файлом.
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// Итоговый интервал сохранения: дефолт флага; JSON может подставить
+	// значение полной точности (например, "500ms"); флаг/env затем
+	// переопределяют по приоритету.
+	storeDur := time.Duration(*storeInterval) * time.Second
 
 	// Путь до JSON-файла: -c или -config; env CONFIG перекрывает флаг.
 	cfgPath := *configPath
@@ -99,7 +108,7 @@ func parseConfig() (serverConfig, error) {
 			if err != nil {
 				return serverConfig{}, fmt.Errorf("config store_interval: %w", err)
 			}
-			*storeInterval = int(d / time.Second)
+			storeDur = d
 		}
 		if !setFlags["f"] && jsonCfg.StoreFile != "" {
 			*filePath = jsonCfg.StoreFile
@@ -112,6 +121,11 @@ func parseConfig() (serverConfig, error) {
 		}
 	}
 
+	// Флаг переопределяет JSON, но если явно указан.
+	if setFlags["i"] {
+		storeDur = time.Duration(*storeInterval) * time.Second
+	}
+
 	// Env-переменные — самый высокий приоритет.
 	if v, ok := os.LookupEnv("ADDRESS"); ok {
 		*addr = v
@@ -121,7 +135,7 @@ func parseConfig() (serverConfig, error) {
 		if err != nil {
 			return serverConfig{}, fmt.Errorf("неверное значение STORE_INTERVAL: %w", err)
 		}
-		*storeInterval = sec
+		storeDur = time.Duration(sec) * time.Second
 	}
 	if v, ok := os.LookupEnv("FILE_STORAGE_PATH"); ok {
 		*filePath = v
@@ -159,7 +173,7 @@ func parseConfig() (serverConfig, error) {
 	return serverConfig{
 		Addr:          *addr,
 		LogLevel:      *logLevel,
-		StoreInterval: *storeInterval,
+		StoreInterval: storeDur,
 		FilePath:      *filePath,
 		Restore:       *restore,
 		DatabaseDSN:   *databaseDSN,

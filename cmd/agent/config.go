@@ -20,7 +20,7 @@ type agentConfig struct {
 }
 
 // agentJSONConfig — представление конфигурации из JSON-файла.
-// Интервалы задаются строкой в формате time.Duration ("1s", "500ms").
+// Интервалы задаются строкой в формате time.Duration ("1s", "500ms", "1m30s").
 type agentJSONConfig struct {
 	Address        string `json:"address"`
 	ReportInterval string `json:"report_interval"`
@@ -44,6 +44,10 @@ func loadAgentJSON(path string) (*agentJSONConfig, error) {
 // parseConfig собирает конфигурацию агента с учётом приоритетов:
 // env > флаг > значение из JSON-файла > дефолт. Файл конфигурации
 // указывается через -c/-config или переменную окружения CONFIG.
+//
+// Интервалы хранятся как time.Duration; из JSON поддерживается полный
+// формат time.ParseDuration ("500ms", "1m30s"), из флагов и env — целые
+// секунды (обратная совместимость).
 func parseConfig() (agentConfig, error) {
 	addr := flag.String("a", "localhost:8080", "адрес сервера (host:port)")
 	pollInterval := flag.Int("p", 2, "интервал сбора метрик (сек)")
@@ -60,6 +64,12 @@ func parseConfig() (agentConfig, error) {
 	// имеют приоритет над JSON-файлом.
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// Итоговые длительности: сначала берём дефолты флагов, дальше
+	// последовательно поднимаем приоритеты (JSON → флаг → env).
+	// Хранение в time.Duration сохраняет полную точность JSON-формата.
+	pollDur := time.Duration(*pollInterval) * time.Second
+	reportDur := time.Duration(*reportInterval) * time.Second
 
 	// Путь до JSON-файла: -c или -config; env CONFIG перекрывает флаг.
 	cfgPath := *configPath
@@ -85,18 +95,26 @@ func parseConfig() (agentConfig, error) {
 			if err != nil {
 				return agentConfig{}, fmt.Errorf("config poll_interval: %w", err)
 			}
-			*pollInterval = int(d / time.Second)
+			pollDur = d
 		}
 		if !setFlags["r"] && jsonCfg.ReportInterval != "" {
 			d, err := time.ParseDuration(jsonCfg.ReportInterval)
 			if err != nil {
 				return agentConfig{}, fmt.Errorf("config report_interval: %w", err)
 			}
-			*reportInterval = int(d / time.Second)
+			reportDur = d
 		}
 		if !setFlags["crypto-key"] && jsonCfg.CryptoKey != "" {
 			*cryptoKey = jsonCfg.CryptoKey
 		}
+	}
+
+	// Флаг переопределяет JSON, но если явно указан.
+	if setFlags["p"] {
+		pollDur = time.Duration(*pollInterval) * time.Second
+	}
+	if setFlags["r"] {
+		reportDur = time.Duration(*reportInterval) * time.Second
 	}
 
 	// Env-переменные имеют самый высокий приоритет.
@@ -108,14 +126,14 @@ func parseConfig() (agentConfig, error) {
 		if err != nil {
 			return agentConfig{}, fmt.Errorf("неверное значение REPORT_INTERVAL: %w", err)
 		}
-		*reportInterval = sec
+		reportDur = time.Duration(sec) * time.Second
 	}
 	if v, ok := os.LookupEnv("POLL_INTERVAL"); ok {
 		sec, err := strconv.Atoi(v)
 		if err != nil {
 			return agentConfig{}, fmt.Errorf("неверное значение POLL_INTERVAL: %w", err)
 		}
-		*pollInterval = sec
+		pollDur = time.Duration(sec) * time.Second
 	}
 	if v, ok := os.LookupEnv("RATE_LIMIT"); ok {
 		rl, err := strconv.Atoi(v)
@@ -133,8 +151,8 @@ func parseConfig() (agentConfig, error) {
 
 	return agentConfig{
 		Addr:           *addr,
-		PollInterval:   time.Duration(*pollInterval) * time.Second,
-		ReportInterval: time.Duration(*reportInterval) * time.Second,
+		PollInterval:   pollDur,
+		ReportInterval: reportDur,
 		HashKey:        *hashKey,
 		RateLimit:      *rateLimit,
 		CryptoKey:      *cryptoKey,

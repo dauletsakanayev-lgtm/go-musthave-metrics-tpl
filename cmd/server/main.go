@@ -4,7 +4,6 @@ import (
 	"crypto/rsa"
 	"database/sql"
 	"os"
-	"time"
 
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/audit"
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/buildinfo"
@@ -60,7 +59,7 @@ func main() {
 		}
 		// периодическое сохранение на диск
 		if cfg.FilePath != "" && cfg.StoreInterval > 0 {
-			go storage.RunSaver(memRepo, cfg.FilePath, time.Duration(cfg.StoreInterval)*time.Second)
+			go storage.RunSaver(memRepo, cfg.FilePath, cfg.StoreInterval)
 		}
 		//синхронная запись — передаём filePath в сервер
 		if cfg.FilePath != "" && cfg.StoreInterval == 0 {

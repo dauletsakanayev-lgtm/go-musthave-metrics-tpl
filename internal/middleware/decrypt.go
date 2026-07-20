@@ -25,13 +25,15 @@ func DecryptMiddleware(privateKey *rsa.PrivateKey) func(http.Handler) http.Handl
 			}
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
-				log.Error().Err(err).Msg("ошибка чтения тела запроса при расшифровке")
+				// 4xx — ошибка клиента: пишем на уровне Debug,
+				// чтобы не засорять лог сервера.
+				log.Debug().Err(err).Msg("ошибка чтения тела запроса при расшифровке")
 				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 				return
 			}
 			decrypted, err := crypto.Decrypt(privateKey, body)
 			if err != nil {
-				log.Error().Err(err).Msg("ошибка расшифровки тела запроса")
+				log.Debug().Err(err).Msg("ошибка расшифровки тела запроса")
 				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 				return
 			}
