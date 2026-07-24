@@ -22,6 +22,7 @@ type serverConfig struct {
 	AuditURL      string
 	EnablePprof   bool
 	CryptoKey     string
+	TrustedSubnet string
 }
 
 // serverJSONConfig — представление конфигурации сервера из JSON-файла.
@@ -34,6 +35,7 @@ type serverJSONConfig struct {
 	StoreFile     string `json:"store_file"`
 	DatabaseDSN   string `json:"database_dsn"`
 	CryptoKey     string `json:"crypto_key"`
+	TrustedSubnet string `json:"trusted_subnet"`
 }
 
 // loadServerJSON читает и парсит JSON-файл конфигурации сервера.
@@ -68,6 +70,7 @@ func parseConfig() (serverConfig, error) {
 	auditURL := flag.String("audit-url", "", "URL приёмника логов аудита (пусто — аудит по сети отключён)")
 	enablePprof := flag.Bool("pprof", false, "включить эндпоинты /debug/pprof (только для dev/staging)")
 	cryptoKey := flag.String("crypto-key", "", "путь до файла с приватным RSA-ключом (пусто — расшифровка отключена)")
+	trustedSubnet := flag.String("t", "", "CIDR доверенной подсети агентов (пусто — проверка X-Real-IP отключена)")
 	configPath := flag.String("c", "", "путь до JSON-файла конфигурации")
 	configPathLong := flag.String("config", "", "путь до JSON-файла конфигурации (алиас -c)")
 	flag.Parse()
@@ -119,6 +122,9 @@ func parseConfig() (serverConfig, error) {
 		if !setFlags["crypto-key"] && jsonCfg.CryptoKey != "" {
 			*cryptoKey = jsonCfg.CryptoKey
 		}
+		if !setFlags["t"] && jsonCfg.TrustedSubnet != "" {
+			*trustedSubnet = jsonCfg.TrustedSubnet
+		}
 	}
 
 	// Флаг переопределяет JSON, но если явно указан.
@@ -169,6 +175,9 @@ func parseConfig() (serverConfig, error) {
 	if v, ok := os.LookupEnv("CRYPTO_KEY"); ok {
 		*cryptoKey = v
 	}
+	if v, ok := os.LookupEnv("TRUSTED_SUBNET"); ok {
+		*trustedSubnet = v
+	}
 
 	return serverConfig{
 		Addr:          *addr,
@@ -182,5 +191,6 @@ func parseConfig() (serverConfig, error) {
 		AuditURL:      *auditURL,
 		EnablePprof:   *enablePprof,
 		CryptoKey:     *cryptoKey,
+		TrustedSubnet: *trustedSubnet,
 	}, nil
 }

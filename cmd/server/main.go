@@ -98,7 +98,7 @@ func main() {
 		log.Info().Str("path", cfg.CryptoKey).Msg("расшифровка трафика включена")
 	}
 
-	srv := server.New(cfg.Addr, repo, db, cfg.HashKey, auditPub, cfg.EnablePprof, privateKey)
+	srv := server.New(cfg.Addr, repo, db, cfg.HashKey, auditPub, cfg.EnablePprof, privateKey, cfg.TrustedSubnet)
 	if err := srv.Run(); err != nil {
 		log.Fatal().Err(err).Msg("ошибка запуска сервера")
 	}

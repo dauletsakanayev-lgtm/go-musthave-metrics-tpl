@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -22,6 +23,7 @@ type Sender struct {
 	client    *http.Client
 	hashKey   string
 	publicKey *rsa.PublicKey
+	localIP   string // адрес хоста агента для заголовка X-Real-IP
 }
 
 func NewSender(baseURL string, hashKey string, publicKey *rsa.PublicKey) *Sender {
@@ -35,7 +37,30 @@ func NewSender(baseURL string, hashKey string, publicKey *rsa.PublicKey) *Sender
 		client:    retryClient.StandardClient(),
 		hashKey:   hashKey,
 		publicKey: publicKey,
+		localIP:   detectLocalIP(),
 	}
+}
+
+// detectLocalIP возвращает первый non-loopback IPv4-адрес хоста —
+// он проставляется в заголовок X-Real-IP всех исходящих запросов.
+// Если ни один интерфейс не найден, возвращает пустую строку
+// (сервер отвергнет такой запрос при включённой проверке подсети).
+func detectLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 != nil {
+			return ip4.String()
+		}
+	}
+	return ""
 }
 
 // encryptIfNeeded шифрует data публичным ключом, если он задан;
@@ -95,6 +120,9 @@ func (s *Sender) postjson(m models.Metrics) error {
 	}
 	if encrypted {
 		req.Header.Set("X-Encrypted", "true")
+	}
+	if s.localIP != "" {
+		req.Header.Set("X-Real-IP", s.localIP)
 	}
 
 	resp, err := s.client.Do(req)
@@ -197,6 +225,9 @@ func (s *Sender) SendBatch(gauge []GaugeMetric, pollCountDelta int64) error {
 	}
 	if encrypted {
 		req.Header.Set("X-Encrypted", "true")
+	}
+	if s.localIP != "" {
+		req.Header.Set("X-Real-IP", s.localIP)
 	}
 
 	resp, err := s.client.Do(req)

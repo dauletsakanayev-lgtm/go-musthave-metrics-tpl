@@ -28,28 +28,31 @@ import (
 // хранилище метрик, соединение с БД, ключ подписи, издатель аудита и флаг
 // включения эндпоинтов профилирования pprof.
 type Server struct {
-	addr        string
-	repo        storage.Repository
-	db          *sql.DB
-	hashKey     string
-	auditPub    *audit.Publisher
-	enablePprof bool
-	privateKey  *rsa.PrivateKey
+	addr          string
+	repo          storage.Repository
+	db            *sql.DB
+	hashKey       string
+	auditPub      *audit.Publisher
+	enablePprof   bool
+	privateKey    *rsa.PrivateKey
+	trustedSubnet string
 }
 
 // New создаёт сервер с заданным адресом, хранилищем, соединением с БД,
 // ключом HMAC-подписи (пустой — подпись отключена), издателем аудита,
-// флагом enablePprof и приватным RSA-ключом для расшифровки трафика
-// (nil — расшифровка отключена).
-func New(addr string, repo storage.Repository, db *sql.DB, hashKey string, auditPub *audit.Publisher, enablePprof bool, privateKey *rsa.PrivateKey) *Server {
+// флагом enablePprof, приватным RSA-ключом для расшифровки трафика
+// (nil — расшифровка отключена) и CIDR доверенной подсети агентов
+// (пусто — проверка X-Real-IP отключена).
+func New(addr string, repo storage.Repository, db *sql.DB, hashKey string, auditPub *audit.Publisher, enablePprof bool, privateKey *rsa.PrivateKey, trustedSubnet string) *Server {
 	return &Server{
-		addr:        addr,
-		repo:        repo,
-		db:          db,
-		hashKey:     hashKey,
-		auditPub:    auditPub,
-		enablePprof: enablePprof,
-		privateKey:  privateKey,
+		addr:          addr,
+		repo:          repo,
+		db:            db,
+		hashKey:       hashKey,
+		auditPub:      auditPub,
+		enablePprof:   enablePprof,
+		privateKey:    privateKey,
+		trustedSubnet: trustedSubnet,
 	}
 }
 
@@ -61,6 +64,15 @@ func (s *Server) buildRouter() http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(logger.RequestLogger)
+	// Проверка доверенной подсети — до всех остальных обработок.
+	// Отказ по IP не должен приводить к расшифровке или парсингу тела.
+	if s.trustedSubnet != "" {
+		trustedMW, err := middleware.TrustedSubnetMiddleware(s.trustedSubnet)
+		if err != nil {
+			log.Fatal().Err(err).Msg("некорректный CIDR trusted_subnet")
+		}
+		r.Use(trustedMW)
+	}
 	r.Use(middleware.GzipMiddleware)
 	// Расшифровка выполняется сразу после распаковки gzip: агент шифрует
 	// исходные данные, затем сжимает их; сервер идёт в обратном порядке.
