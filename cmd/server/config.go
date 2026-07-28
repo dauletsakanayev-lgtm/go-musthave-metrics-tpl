@@ -23,6 +23,7 @@ type serverConfig struct {
 	EnablePprof   bool
 	CryptoKey     string
 	TrustedSubnet string
+	GRPCAddress   string
 }
 
 // serverJSONConfig — представление конфигурации сервера из JSON-файла.
@@ -36,6 +37,7 @@ type serverJSONConfig struct {
 	DatabaseDSN   string `json:"database_dsn"`
 	CryptoKey     string `json:"crypto_key"`
 	TrustedSubnet string `json:"trusted_subnet"`
+	GRPCAddress   string `json:"grpc_address"`
 }
 
 // loadServerJSON читает и парсит JSON-файл конфигурации сервера.
@@ -71,6 +73,7 @@ func parseConfig() (serverConfig, error) {
 	enablePprof := flag.Bool("pprof", false, "включить эндпоинты /debug/pprof (только для dev/staging)")
 	cryptoKey := flag.String("crypto-key", "", "путь до файла с приватным RSA-ключом (пусто — расшифровка отключена)")
 	trustedSubnet := flag.String("t", "", "CIDR доверенной подсети агентов (пусто — проверка X-Real-IP отключена)")
+	grpcAddress := flag.String("grpc-address", "", "адрес gRPC-сервера метрик (пусто — gRPC отключён)")
 	configPath := flag.String("c", "", "путь до JSON-файла конфигурации")
 	configPathLong := flag.String("config", "", "путь до JSON-файла конфигурации (алиас -c)")
 	flag.Parse()
@@ -125,6 +128,9 @@ func parseConfig() (serverConfig, error) {
 		if !setFlags["t"] && jsonCfg.TrustedSubnet != "" {
 			*trustedSubnet = jsonCfg.TrustedSubnet
 		}
+		if !setFlags["grpc-address"] && jsonCfg.GRPCAddress != "" {
+			*grpcAddress = jsonCfg.GRPCAddress
+		}
 	}
 
 	// Флаг переопределяет JSON, но если явно указан.
@@ -178,6 +184,9 @@ func parseConfig() (serverConfig, error) {
 	if v, ok := os.LookupEnv("TRUSTED_SUBNET"); ok {
 		*trustedSubnet = v
 	}
+	if v, ok := os.LookupEnv("GRPC_ADDRESS"); ok {
+		*grpcAddress = v
+	}
 
 	return serverConfig{
 		Addr:          *addr,
@@ -192,5 +201,6 @@ func parseConfig() (serverConfig, error) {
 		EnablePprof:   *enablePprof,
 		CryptoKey:     *cryptoKey,
 		TrustedSubnet: *trustedSubnet,
+		GRPCAddress:   *grpcAddress,
 	}, nil
 }

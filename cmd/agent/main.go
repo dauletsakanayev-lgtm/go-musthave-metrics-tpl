@@ -43,7 +43,27 @@ func main() {
 		log.Info().Str("path", cfg.CryptoKey).Msg("шифрование трафика включено")
 	}
 
-	sender := agent.NewSender(baseURL, cfg.HashKey, publicKey)
+	// BatchSender — общий интерфейс HTTP- и gRPC-реализаций отправки.
+	type BatchSender interface {
+		SendBatch(gauges []agent.GaugeMetric, pollCountDelta int64) error
+	}
+
+	var sender BatchSender
+	if cfg.Transport == "grpc" {
+		if cfg.GRPCAddress == "" {
+			log.Fatal().Msg("для transport=grpc нужен -grpc-address (или GRPC_ADDRESS)")
+		}
+		gs, err := agent.NewGRPCSender(cfg.GRPCAddress)
+		if err != nil {
+			log.Fatal().Err(err).Msg("не удалось подключиться к gRPC-серверу")
+		}
+		defer gs.Close()
+		log.Info().Str("addr", cfg.GRPCAddress).Msg("транспорт метрик: gRPC")
+		sender = gs
+	} else {
+		sender = agent.NewSender(baseURL, cfg.HashKey, publicKey)
+		log.Info().Str("url", baseURL).Msg("транспорт метрик: HTTP")
+	}
 	store := agent.NewMetricsStore()
 
 	// ctx отменяется при получении сигнала завершения (SIGINT/SIGTERM/SIGQUIT).

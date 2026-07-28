@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rsa"
 	"database/sql"
+	"net"
 	"os"
 
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/audit"
@@ -12,6 +13,7 @@ import (
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/server"
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/storage"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
 )
 
 // Сведения о сборке. Значения по умолчанию можно перезаписать при компиляции
@@ -98,9 +100,34 @@ func main() {
 		log.Info().Str("path", cfg.CryptoKey).Msg("расшифровка трафика включена")
 	}
 
+	// gRPC-сервер поднимается параллельно с HTTP, если задан адрес.
+	// Останавливается через GracefulStop после завершения HTTP-цикла (по SIGINT).
+	var grpcSrv *grpc.Server
+	if cfg.GRPCAddress != "" {
+		lis, err := net.Listen("tcp", cfg.GRPCAddress)
+		if err != nil {
+			log.Fatal().Err(err).Str("addr", cfg.GRPCAddress).Msg("не удалось открыть gRPC-порт")
+		}
+		grpcSrv, err = server.NewGRPCServer(repo, cfg.TrustedSubnet)
+		if err != nil {
+			log.Fatal().Err(err).Msg("ошибка инициализации gRPC-сервера")
+		}
+		go func() {
+			log.Info().Str("addr", cfg.GRPCAddress).Msg("gRPC-сервер запущен")
+			if err := grpcSrv.Serve(lis); err != nil {
+				log.Error().Err(err).Msg("gRPC-сервер завершился с ошибкой")
+			}
+		}()
+	}
+
 	srv := server.New(cfg.Addr, repo, db, cfg.HashKey, auditPub, cfg.EnablePprof, privateKey, cfg.TrustedSubnet)
 	if err := srv.Run(); err != nil {
 		log.Fatal().Err(err).Msg("ошибка запуска сервера")
+	}
+
+	if grpcSrv != nil {
+		log.Info().Msg("останавливаем gRPC-сервер")
+		grpcSrv.GracefulStop()
 	}
 
 	// Graceful shutdown: срv.Run уже дождался завершения in-flight
