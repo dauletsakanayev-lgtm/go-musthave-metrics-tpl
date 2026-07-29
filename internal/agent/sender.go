@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -22,6 +23,7 @@ type Sender struct {
 	client    *http.Client
 	hashKey   string
 	publicKey *rsa.PublicKey
+	localIP   string // адрес хоста агента для заголовка X-Real-IP
 }
 
 func NewSender(baseURL string, hashKey string, publicKey *rsa.PublicKey) *Sender {
@@ -35,7 +37,30 @@ func NewSender(baseURL string, hashKey string, publicKey *rsa.PublicKey) *Sender
 		client:    retryClient.StandardClient(),
 		hashKey:   hashKey,
 		publicKey: publicKey,
+		localIP:   detectLocalIP(),
 	}
+}
+
+// detectLocalIP возвращает outbound IP-адрес хоста для заголовка X-Real-IP
+// и одноимённой gRPC-метадаты. Работает через net.Dial("udp", ...):
+// UDP на unconnected сокете не отправляет ни одного пакета, ядро только
+// резолвит маршрут и заполняет LocalAddr тем интерфейсом, через который
+// реально ушёл бы трафик. Это надёжнее перебора net.InterfaceAddrs():
+// корректно выбирает нужный NIC при multi-homed хосте.
+//
+// Возвращает пустую строку, если разрешить маршрут не удалось (нет сети) —
+// сервер с включённой проверкой подсети отклонит такой запрос.
+func detectLocalIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return ""
+	}
+	return addr.IP.String()
 }
 
 // encryptIfNeeded шифрует data публичным ключом, если он задан;
@@ -95,6 +120,9 @@ func (s *Sender) postjson(m models.Metrics) error {
 	}
 	if encrypted {
 		req.Header.Set("X-Encrypted", "true")
+	}
+	if s.localIP != "" {
+		req.Header.Set("X-Real-IP", s.localIP)
 	}
 
 	resp, err := s.client.Do(req)
@@ -197,6 +225,9 @@ func (s *Sender) SendBatch(gauge []GaugeMetric, pollCountDelta int64) error {
 	}
 	if encrypted {
 		req.Header.Set("X-Encrypted", "true")
+	}
+	if s.localIP != "" {
+		req.Header.Set("X-Real-IP", s.localIP)
 	}
 
 	resp, err := s.client.Do(req)

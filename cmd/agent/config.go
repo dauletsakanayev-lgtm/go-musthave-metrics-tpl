@@ -17,6 +17,8 @@ type agentConfig struct {
 	HashKey        string
 	RateLimit      int
 	CryptoKey      string
+	GRPCAddress    string
+	Transport      string // "http" (по умолчанию) | "grpc"
 }
 
 // agentJSONConfig — представление конфигурации из JSON-файла.
@@ -26,6 +28,8 @@ type agentJSONConfig struct {
 	ReportInterval string `json:"report_interval"`
 	PollInterval   string `json:"poll_interval"`
 	CryptoKey      string `json:"crypto_key"`
+	GRPCAddress    string `json:"grpc_address"`
+	Transport      string `json:"transport"`
 }
 
 // loadAgentJSON читает и парсит JSON-файл конфигурации агента.
@@ -55,6 +59,8 @@ func parseConfig() (agentConfig, error) {
 	hashKey := flag.String("k", "", "ключ для подписи SHA256")
 	rateLimit := flag.Int("l", 1, "количество одновременных запросов")
 	cryptoKey := flag.String("crypto-key", "", "путь до файла с публичным RSA-ключом (пусто — шифрование отключено)")
+	grpcAddress := flag.String("grpc-address", "", "адрес gRPC-сервера метрик (используется при -transport=grpc)")
+	transport := flag.String("transport", "http", "транспорт отправки метрик: http | grpc")
 	configPath := flag.String("c", "", "путь до JSON-файла конфигурации")
 	configPathLong := flag.String("config", "", "путь до JSON-файла конфигурации (алиас -c)")
 
@@ -107,6 +113,12 @@ func parseConfig() (agentConfig, error) {
 		if !setFlags["crypto-key"] && jsonCfg.CryptoKey != "" {
 			*cryptoKey = jsonCfg.CryptoKey
 		}
+		if !setFlags["grpc-address"] && jsonCfg.GRPCAddress != "" {
+			*grpcAddress = jsonCfg.GRPCAddress
+		}
+		if !setFlags["transport"] && jsonCfg.Transport != "" {
+			*transport = jsonCfg.Transport
+		}
 	}
 
 	// Флаг переопределяет JSON, но если явно указан.
@@ -148,6 +160,12 @@ func parseConfig() (agentConfig, error) {
 	if v, ok := os.LookupEnv("CRYPTO_KEY"); ok {
 		*cryptoKey = v
 	}
+	if v, ok := os.LookupEnv("GRPC_ADDRESS"); ok {
+		*grpcAddress = v
+	}
+	if v, ok := os.LookupEnv("TRANSPORT"); ok {
+		*transport = v
+	}
 
 	return agentConfig{
 		Addr:           *addr,
@@ -156,5 +174,7 @@ func parseConfig() (agentConfig, error) {
 		HashKey:        *hashKey,
 		RateLimit:      *rateLimit,
 		CryptoKey:      *cryptoKey,
+		GRPCAddress:    *grpcAddress,
+		Transport:      *transport,
 	}, nil
 }
