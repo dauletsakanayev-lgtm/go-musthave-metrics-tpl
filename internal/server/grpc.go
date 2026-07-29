@@ -9,6 +9,7 @@ import (
 	models "github.com/bluegopher/go-musthave-metrics-tpl/internal/model"
 	pb "github.com/bluegopher/go-musthave-metrics-tpl/internal/proto"
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/storage"
+	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -42,12 +43,16 @@ func (s *MetricsGRPCServer) UpdateMetrics(ctx context.Context, req *pb.UpdateMet
 			d := m.GetDelta()
 			metric.Delta = &d
 		default:
+			// Тип из внешнего запроса — сообщать безопасно, помогает клиенту.
 			return nil, status.Errorf(codes.InvalidArgument, "unknown metric type: %v", m.GetType())
 		}
 		batch = append(batch, metric)
 	}
 	if err := s.repo.UpdateBatch(ctx, batch); err != nil {
-		return nil, status.Errorf(codes.Internal, "update batch: %v", err)
+		// Внутренние ошибки хранилища могут содержать SQL / имена таблиц /
+		// фрагменты DSN — наружу отдаём общий текст, детали остаются в логах.
+		log.Error().Err(err).Msg("gRPC UpdateMetrics: repo.UpdateBatch failed")
+		return nil, status.Error(codes.Internal, "internal error")
 	}
 	return &pb.UpdateMetricsResponse{}, nil
 }

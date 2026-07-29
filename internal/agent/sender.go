@@ -41,26 +41,26 @@ func NewSender(baseURL string, hashKey string, publicKey *rsa.PublicKey) *Sender
 	}
 }
 
-// detectLocalIP возвращает первый non-loopback IPv4-адрес хоста —
-// он проставляется в заголовок X-Real-IP всех исходящих запросов.
-// Если ни один интерфейс не найден, возвращает пустую строку
-// (сервер отвергнет такой запрос при включённой проверке подсети).
+// detectLocalIP возвращает outbound IP-адрес хоста для заголовка X-Real-IP
+// и одноимённой gRPC-метадаты. Работает через net.Dial("udp", ...):
+// UDP на unconnected сокете не отправляет ни одного пакета, ядро только
+// резолвит маршрут и заполняет LocalAddr тем интерфейсом, через который
+// реально ушёл бы трафик. Это надёжнее перебора net.InterfaceAddrs():
+// корректно выбирает нужный NIC при multi-homed хосте.
+//
+// Возвращает пустую строку, если разрешить маршрут не удалось (нет сети) —
+// сервер с включённой проверкой подсети отклонит такой запрос.
 func detectLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
+	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return ""
 	}
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok || ipnet.IP.IsLoopback() {
-			continue
-		}
-		ip4 := ipnet.IP.To4()
-		if ip4 != nil {
-			return ip4.String()
-		}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return ""
 	}
-	return ""
+	return addr.IP.String()
 }
 
 // encryptIfNeeded шифрует data публичным ключом, если он задан;

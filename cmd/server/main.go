@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"database/sql"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/audit"
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/buildinfo"
@@ -13,6 +16,7 @@ import (
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/server"
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/storage"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 )
 
@@ -100,8 +104,26 @@ func main() {
 		log.Info().Str("path", cfg.CryptoKey).Msg("расшифровка трафика включена")
 	}
 
-	// gRPC-сервер поднимается параллельно с HTTP, если задан адрес.
-	// Останавливается через GracefulStop после завершения HTTP-цикла (по SIGINT).
+	// Единый контекст завершения: сигнал OS отменяет ctx, любая ошибка
+	// внутри errgroup — тоже. Оба транспорта (HTTP и gRPC) получают
+	// одно и то же событие остановки: падение одного не оставит второй
+	// в подвешенном состоянии.
+	ctx, stop := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	// HTTP-сервер.
+	srv := server.New(cfg.Addr, repo, db, cfg.HashKey, auditPub, cfg.EnablePprof, privateKey, cfg.TrustedSubnet)
+	g.Go(func() error {
+		return srv.Run(gctx)
+	})
+
+	// gRPC-сервер поднимается параллельно, если задан адрес.
+	// Отдельная горутина-watcher дёргает GracefulStop при отмене gctx —
+	// это позволяет errgroup узнать о сбое gRPC-транспорта (ошибка Serve)
+	// и симметрично уронить HTTP.
 	var grpcSrv *grpc.Server
 	if cfg.GRPCAddress != "" {
 		lis, err := net.Listen("tcp", cfg.GRPCAddress)
@@ -112,22 +134,20 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("ошибка инициализации gRPC-сервера")
 		}
-		go func() {
+		g.Go(func() error {
 			log.Info().Str("addr", cfg.GRPCAddress).Msg("gRPC-сервер запущен")
-			if err := grpcSrv.Serve(lis); err != nil {
-				log.Error().Err(err).Msg("gRPC-сервер завершился с ошибкой")
-			}
-		}()
+			return grpcSrv.Serve(lis)
+		})
+		g.Go(func() error {
+			<-gctx.Done()
+			log.Info().Msg("останавливаем gRPC-сервер")
+			grpcSrv.GracefulStop()
+			return nil
+		})
 	}
 
-	srv := server.New(cfg.Addr, repo, db, cfg.HashKey, auditPub, cfg.EnablePprof, privateKey, cfg.TrustedSubnet)
-	if err := srv.Run(); err != nil {
-		log.Fatal().Err(err).Msg("ошибка запуска сервера")
-	}
-
-	if grpcSrv != nil {
-		log.Info().Msg("останавливаем gRPC-сервер")
-		grpcSrv.GracefulStop()
+	if err := g.Wait(); err != nil {
+		log.Error().Err(err).Msg("завершение с ошибкой одного из транспортов")
 	}
 
 	// Graceful shutdown: срv.Run уже дождался завершения in-flight

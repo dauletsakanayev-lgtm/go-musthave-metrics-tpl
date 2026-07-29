@@ -8,9 +8,6 @@ import (
 	"crypto/rsa"
 	"database/sql"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/bluegopher/go-musthave-metrics-tpl/internal/audit"
@@ -101,13 +98,18 @@ func (s *Server) buildRouter() http.Handler {
 	return r
 }
 
-// Run настраивает роутер и запускает HTTP-сервер, блокируясь до получения
-// сигнала прерывания (SIGINT/SIGTERM/SIGQUIT), после чего выполняет
-// graceful shutdown: даёт срок in-flight запросам завершиться, затем возвращает
-// управление, чтобы main мог сохранить состояние и закрыть внешние ресурсы.
-// Для отслеживания сигнала используется signal.NotifyContext — это
-// идиоматичнее ручного канала и не требует явного signal.Stop.
-func (s *Server) Run() error {
+// Run настраивает роутер и запускает HTTP-сервер, блокируясь до отмены
+// переданного контекста, после чего выполняет graceful shutdown: даёт срок
+// in-flight запросам завершиться, затем возвращает управление, чтобы main
+// мог сохранить состояние и закрыть внешние ресурсы.
+//
+// Управление сигналами (SIGINT/SIGTERM/SIGQUIT) вынесено в main.go, где
+// один signal.NotifyContext координирует HTTP и gRPC через errgroup —
+// падение или сигнал одного транспорта отменяет ctx и останавливает второй.
+//
+// Возвращает ошибку от ListenAndServe (кроме штатного ErrServerClosed) или
+// ошибку Shutdown; если сервер отработал корректно — nil.
+func (s *Server) Run(ctx context.Context) error {
 	r := s.buildRouter()
 
 	srv := &http.Server{
@@ -117,27 +119,30 @@ func (s *Server) Run() error {
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
+
+	serveErr := make(chan error, 1)
 	go func() {
+		log.Info().Str("addr", s.addr).Msg("HTTP-сервер запущен")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("Ошибка при запуска сервера")
+			serveErr <- err
+			return
 		}
+		serveErr <- nil
 	}()
-	log.Info().Str("addr", s.addr).Msg("сервер запущен")
 
-	// Контекст отменяется при получении любого из сигналов; stop освобождает
-	// ресурсы пакета signal при выходе из функции.
-	ctx, stop := signal.NotifyContext(context.Background(),
-		os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
-	defer stop()
+	select {
+	case err := <-serveErr:
+		// Слушатель упал (порт занят и т.п.) до сигнала отмены.
+		return err
+	case <-ctx.Done():
+	}
 
-	<-ctx.Done()
-	log.Info().Msg("Выключене сервера ... ")
-
+	log.Info().Msg("останавливаем HTTP-сервер")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatal().Err(err).Msg("Сервер был отключен")
+		return err
 	}
-	log.Info().Msg("Сервер завершил работу корректно")
+	log.Info().Msg("HTTP-сервер завершил работу корректно")
 	return nil
 }
